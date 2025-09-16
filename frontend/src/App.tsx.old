@@ -1,0 +1,959 @@
+import { useState, useEffect } from 'react'
+import { ethers } from 'ethers'
+import './App.css'
+
+// Private Audit Contract Configuration
+const CONTRACT_ADDRESS = "0x1408E6bea377D2a79118a320472473b0dFC1308F"
+const CONTRACT_ABI = [
+  "function createAccount(bytes calldata encryptedBalance, string calldata accountType) external returns (uint256)",
+  "function updateBalance(uint256 accountId, bytes calldata encryptedNewBalance, string calldata updateType) external",
+  "function initiateAudit(uint256 accountId, string calldata auditType) external returns (uint256)",
+  "function completeAudit(uint256 auditId, bytes calldata encryptedFlag) external",
+  "function getAccountInfo(uint256 accountId) external view returns (bool isActive, uint256 lastUpdated, address accountOwner, bytes32 accountType)",
+  "function getUserAccounts(address user) external view returns (uint256[])",
+  "function getEncryptedBalance(uint256 accountId) external view returns (bytes32)",
+  "function getEncryptedTransactions(uint256 accountId) external view returns (bytes32)",
+  "function getAuditRecord(uint256 auditId) external view returns (uint256 accountId, uint256 auditTimestamp, bool isCompleted, bytes32 auditType)",
+  "function getAuditFlag(uint256 auditId) external view returns (bytes32)",
+  "function getAccountAudits(uint256 accountId) external view returns (uint256[])",
+  "function transferAuditor(address newAuditor) external",
+  "function deactivateAccount(uint256 accountId) external",
+  "function reactivateAccount(uint256 accountId) external",
+  "function getTotalAccounts() external view returns (uint256)",
+  "function auditor() external view returns (address)",
+  "event AccountCreated(uint256 indexed accountId, address indexed owner, bytes32 accountType)",
+  "event BalanceUpdated(uint256 indexed accountId, uint256 timestamp, bytes32 updateType)",
+  "event AuditInitiated(uint256 indexed accountId, uint256 indexed auditId, bytes32 auditType)",
+  "event AuditCompleted(uint256 indexed accountId, uint256 indexed auditId)",
+  "event AuditorTransferred(address indexed previousAuditor, address indexed newAuditor)"
+]
+
+interface AccountInfo {
+  id: number
+  isActive: boolean
+  lastUpdated: number
+  owner: string
+  accountType: string
+}
+
+interface TransactionStatus {
+  hash: string
+  status: 'pending' | 'confirmed' | 'failed'
+  type: string
+  timestamp: number
+}
+
+interface NetworkInfo {
+  chainId: string
+  name: string
+  isConnected: boolean
+  blockNumber?: number
+}
+
+function App() {
+  const [account, setAccount] = useState<string>('')
+  const [contract, setContract] = useState<ethers.Contract | null>(null)
+  const [provider, setProvider] = useState<ethers.BrowserProvider | null>(null)
+  const [signer, setSigner] = useState<ethers.Signer | null>(null)
+  const [isAuditor, setIsAuditor] = useState<boolean>(false)
+  const [userAccounts, setUserAccounts] = useState<AccountInfo[]>([])
+  const [selectedAccount, setSelectedAccount] = useState<number | null>(null)
+  const [loading, setLoading] = useState<boolean>(false)
+  const [message, setMessage] = useState<string>('连接钱包开始使用机密财务审计系统')
+  const [activeTab, setActiveTab] = useState<'accounts' | 'audit' | 'transactions'>('accounts')
+  const [transactionHistory, setTransactionHistory] = useState<TransactionStatus[]>([])
+  const [networkInfo, setNetworkInfo] = useState<NetworkInfo>({ chainId: '', name: '', isConnected: false })
+  const [balance, setBalance] = useState<string>('0')
+  const [gasPrice, setGasPrice] = useState<string>('0')
+
+  // Form states
+  const [accountType, setAccountType] = useState<string>('')
+  const [initialBalance, setInitialBalance] = useState<string>('')
+  const [updateType, setUpdateType] = useState<string>('deposit')
+  const [updateAmount, setUpdateAmount] = useState<string>('')
+  const [auditType, setAuditType] = useState<string>('')
+  const [auditFilter, setAuditFilter] = useState<string>('all')
+
+  const showMessage = (msg: string) => {
+    setMessage(msg)
+  }
+
+  const setLoadingState = (isLoading: boolean) => {
+    setLoading(isLoading)
+  }
+
+  const connectWallet = async () => {
+    try {
+      if (!window.ethereum) {
+        alert('请安装 MetaMask 钱包!')
+        return
+      }
+
+      setLoadingState(true)
+      showMessage('正在连接 MetaMask...')
+
+      // Request account access
+      const accounts = await window.ethereum.request({
+        method: 'eth_requestAccounts'
+      })
+
+      // Check and switch to Sepolia network
+      const chainId = await window.ethereum.request({ method: 'eth_chainId' })
+      const sepoliaChainId = '0xaa36a7' // 11155111 in hex
+      
+      if (chainId !== sepoliaChainId) {
+        try {
+          showMessage('正在切换到 Sepolia 测试网络...')
+          await window.ethereum.request({
+            method: 'wallet_switchEthereumChain',
+            params: [{ chainId: sepoliaChainId }],
+          })
+        } catch (switchError: any) {
+          // Network not added yet, add it
+          if (switchError.code === 4902) {
+            showMessage('正在添加 Sepolia 网络...')
+            await window.ethereum.request({
+              method: 'wallet_addEthereumChain',
+              params: [{
+                chainId: sepoliaChainId,
+                chainName: 'Sepolia Test Network',
+                rpcUrls: ['https://sepolia.infura.io/v3/', 'https://rpc.sepolia.org'],
+                nativeCurrency: {
+                  name: 'Sepolia ETH',
+                  symbol: 'SepoliaETH',
+                  decimals: 18
+                },
+                blockExplorerUrls: ['https://sepolia.etherscan.io/']
+              }]
+            })
+          } else {
+            throw switchError
+          }
+        }
+      }
+
+      // Initialize ethers provider and signer
+      const newProvider = new ethers.BrowserProvider(window.ethereum)
+      const newSigner = await newProvider.getSigner()
+      const contractInstance = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, newSigner)
+
+      // Get network info and user balance
+      const network = await newProvider.getNetwork()
+      const userBalance = await newProvider.getBalance(accounts[0])
+      const currentGasPrice = await newProvider.getFeeData()
+      const blockNumber = await newProvider.getBlockNumber()
+
+      // Update state
+      setProvider(newProvider)
+      setSigner(newSigner)
+      setContract(contractInstance)
+      setAccount(accounts[0])
+      setBalance(ethers.formatEther(userBalance))
+      setGasPrice(ethers.formatUnits(currentGasPrice.gasPrice || 0, 'gwei'))
+      setNetworkInfo({
+        chainId: '0x' + network.chainId.toString(16),
+        name: network.name,
+        isConnected: true,
+        blockNumber
+      })
+
+      showMessage('已成功连接到 Sepolia 测试网络 ✅')
+
+      // Load user data from blockchain
+      await loadUserData(contractInstance, accounts[0])
+
+      // Setup event listeners for account/network changes
+      setupEventListeners()
+
+    } catch (error: any) {
+      console.error('钱包连接失败:', error)
+      showMessage('钱包连接失败: ' + (error.message || error))
+    } finally {
+      setLoadingState(false)
+    }
+  }
+
+  const setupEventListeners = () => {
+    if (!window.ethereum) return
+
+    // Listen for account changes
+    window.ethereum.on('accountsChanged', (accounts: string[]) => {
+      if (accounts.length === 0) {
+        // User disconnected
+        disconnectWallet()
+      } else {
+        // Account changed
+        setAccount(accounts[0])
+        if (contract) {
+          loadUserData(contract, accounts[0])
+        }
+      }
+    })
+
+    // Listen for network changes
+    window.ethereum.on('chainChanged', (chainId: string) => {
+      // Reload the page to reset state
+      window.location.reload()
+    })
+  }
+
+  const disconnectWallet = () => {
+    setAccount('')
+    setContract(null)
+    setProvider(null)
+    setSigner(null)
+    setUserAccounts([])
+    setSelectedAccount(null)
+    setBalance('0')
+    setNetworkInfo({ chainId: '', name: '', isConnected: false })
+    showMessage('钱包已断开连接')
+  }
+
+  const loadUserData = async (contractInstance: ethers.Contract, userAddress: string) => {
+    try {
+      showMessage('正在从区块链加载账户数据...')
+
+      // Get user accounts from contract
+      const accountIds = await contractInstance.getUserAccounts(userAddress)
+      const loadedAccounts: AccountInfo[] = []
+
+      for (const id of accountIds) {
+        try {
+          const info = await contractInstance.getAccountInfo(id)
+          loadedAccounts.push({
+            id: Number(id),
+            isActive: info[0],
+            lastUpdated: Number(info[1]),
+            owner: info[2],
+            accountType: ethers.toUtf8String(info[3]).slice(0, 20) // Truncate for display
+          })
+        } catch (error) {
+          console.error(`Failed to load account ${id}:`, error)
+        }
+      }
+
+      setUserAccounts(loadedAccounts)
+
+      // Check if user is auditor
+      try {
+        const auditorAddress = await contractInstance.auditor()
+        setIsAuditor(auditorAddress.toLowerCase() === userAddress.toLowerCase())
+      } catch (error) {
+        console.error('Failed to check auditor status:', error)
+        setIsAuditor(false)
+      }
+
+      showMessage('账户数据加载完成 ✅')
+
+    } catch (error: any) {
+      console.error('加载用户数据失败:', error)
+      showMessage('加载用户数据失败: ' + error.message)
+    }
+  }
+
+  const createAccount = async () => {
+    if (!contract || !signer || !accountType || !initialBalance) {
+      showMessage('请选择账户类型并输入初始余额')
+      return
+    }
+
+    try {
+      setLoadingState(true)
+      showMessage('正在估算 Gas 费用...')
+
+      // Convert balance to encrypted bytes (FHEVM format)
+      const balanceWei = ethers.parseEther(initialBalance)
+      const encryptedBalance = ethers.toUtf8Bytes(balanceWei.toString()) // Simplified encryption for demo
+
+      // Estimate gas
+      const gasEstimate = await contract.createAccount.estimateGas(
+        encryptedBalance,
+        accountType
+      )
+      
+      const gasLimit = gasEstimate + (gasEstimate * 20n / 100n) // Add 20% buffer
+      const feeData = await provider!.getFeeData()
+      const gasPrice = feeData.gasPrice!
+      const estimatedCost = gasLimit * gasPrice
+
+      showMessage(`估算 Gas: ${gasLimit.toString()}, 费用: ${ethers.formatEther(estimatedCost)} ETH`)
+      
+      // Create transaction with proper gas settings
+      showMessage('正在创建交易，请在 MetaMask 中确认...')
+      
+      const txResponse = await contract.createAccount(
+        encryptedBalance,
+        accountType,
+        {
+          gasLimit: gasLimit,
+          gasPrice: gasPrice
+        }
+      )
+
+      // Add to transaction history
+      const newTx: TransactionStatus = {
+        hash: txResponse.hash,
+        status: 'pending',
+        type: `创建账户 (${accountType})`,
+        timestamp: Date.now()
+      }
+      setTransactionHistory(prev => [newTx, ...prev])
+
+      showMessage(`交易已提交! 哈希: ${txResponse.hash}`)
+      showMessage('等待区块确认...')
+
+      // Wait for confirmation
+      const receipt = await txResponse.wait()
+      
+      if (receipt.status === 1) {
+        // Update transaction status
+        setTransactionHistory(prev => 
+          prev.map(tx => 
+            tx.hash === txResponse.hash 
+              ? { ...tx, status: 'confirmed' as const }
+              : tx
+          )
+        )
+        
+        showMessage(`账户创建成功! 区块: ${receipt.blockNumber}`)
+        
+        // Reset form
+        setAccountType('')
+        setInitialBalance('')
+
+        // Reload user data
+        await loadUserData(contract, account)
+        
+        // Update balance
+        const newBalance = await provider!.getBalance(account)
+        setBalance(ethers.formatEther(newBalance))
+        
+      } else {
+        throw new Error('交易失败')
+      }
+
+    } catch (error: any) {
+      console.error('创建账户失败:', error)
+      
+      // Update transaction status if hash exists
+      if (error.hash) {
+        setTransactionHistory(prev => 
+          prev.map(tx => 
+            tx.hash === error.hash 
+              ? { ...tx, status: 'failed' as const }
+              : tx
+          )
+        )
+      }
+      
+      let errorMessage = '创建账户失败'
+      if (error.code === 'ACTION_REJECTED') {
+        errorMessage = '用户取消了交易'
+      } else if (error.code === 'INSUFFICIENT_FUNDS') {
+        errorMessage = 'ETH 余额不足支付 Gas 费用'
+      } else if (error.message) {
+        errorMessage += ': ' + error.message
+      }
+      
+      showMessage(errorMessage)
+    } finally {
+      setLoadingState(false)
+    }
+  }
+
+  const updateAccountBalance = async () => {
+    if (!contract || !signer || selectedAccount === null || !updateType || !updateAmount) {
+      showMessage('请选择更新类型并输入金额')
+      return
+    }
+
+    try {
+      setLoadingState(true)
+      showMessage('正在估算 Gas 费用...')
+
+      // Convert amount to encrypted bytes (FHEVM format)
+      const amountWei = ethers.parseEther(updateAmount)
+      const encryptedAmount = ethers.toUtf8Bytes(amountWei.toString()) // Simplified encryption
+
+      // Estimate gas
+      const gasEstimate = await contract.updateBalance.estimateGas(
+        selectedAccount,
+        encryptedAmount,
+        updateType
+      )
+      
+      const gasLimit = gasEstimate + (gasEstimate * 20n / 100n)
+      const feeData = await provider!.getFeeData()
+      const gasPrice = feeData.gasPrice!
+      const estimatedCost = gasLimit * gasPrice
+
+      showMessage(`估算 Gas: ${gasLimit.toString()}, 费用: ${ethers.formatEther(estimatedCost)} ETH`)
+      
+      // Create transaction
+      showMessage('正在更新余额，请在 MetaMask 中确认...')
+      
+      const txResponse = await contract.updateBalance(
+        selectedAccount,
+        encryptedAmount,
+        updateType,
+        {
+          gasLimit: gasLimit,
+          gasPrice: gasPrice
+        }
+      )
+
+      // Add to transaction history
+      const newTx: TransactionStatus = {
+        hash: txResponse.hash,
+        status: 'pending',
+        type: `更新余额 - ${updateType}`,
+        timestamp: Date.now()
+      }
+      setTransactionHistory(prev => [newTx, ...prev])
+
+      showMessage(`交易已提交! 哈希: ${txResponse.hash}`)
+      showMessage('等待区块确认...')
+
+      // Wait for confirmation
+      const receipt = await txResponse.wait()
+      
+      if (receipt.status === 1) {
+        // Update transaction status
+        setTransactionHistory(prev => 
+          prev.map(tx => 
+            tx.hash === txResponse.hash 
+              ? { ...tx, status: 'confirmed' as const }
+              : tx
+          )
+        )
+        
+        showMessage(`余额更新成功! 区块: ${receipt.blockNumber}`)
+        
+        // Reset form
+        setUpdateType('deposit')
+        setUpdateAmount('')
+
+        // Reload user data
+        await loadUserData(contract, account)
+        
+        // Update balance
+        const newBalance = await provider!.getBalance(account)
+        setBalance(ethers.formatEther(newBalance))
+        
+      } else {
+        throw new Error('交易失败')
+      }
+
+    } catch (error: any) {
+      console.error('更新余额失败:', error)
+      
+      if (error.hash) {
+        setTransactionHistory(prev => 
+          prev.map(tx => 
+            tx.hash === error.hash 
+              ? { ...tx, status: 'failed' as const }
+              : tx
+          )
+        )
+      }
+      
+      let errorMessage = '更新余额失败'
+      if (error.code === 'ACTION_REJECTED') {
+        errorMessage = '用户取消了交易'
+      } else if (error.code === 'INSUFFICIENT_FUNDS') {
+        errorMessage = 'ETH 余额不足支付 Gas 费用'
+      } else if (error.message) {
+        errorMessage += ': ' + error.message
+      }
+      
+      showMessage(errorMessage)
+    } finally {
+      setLoadingState(false)
+    }
+  }
+
+  const initiateAudit = async (accountId: number) => {
+    if (!contract || !signer || !isAuditor || !auditType) {
+      showMessage('请选择审计类型，只有审计员可以发起审计')
+      return
+    }
+
+    try {
+      setLoadingState(true)
+      showMessage('正在估算 Gas 费用...')
+
+      // Estimate gas
+      const gasEstimate = await contract.initiateAudit.estimateGas(
+        accountId,
+        auditType
+      )
+      
+      const gasLimit = gasEstimate + (gasEstimate * 20n / 100n)
+      const feeData = await provider!.getFeeData()
+      const gasPrice = feeData.gasPrice!
+      const estimatedCost = gasLimit * gasPrice
+
+      showMessage(`估算 Gas: ${gasLimit.toString()}, 费用: ${ethers.formatEther(estimatedCost)} ETH`)
+      
+      // Create transaction
+      showMessage('正在发起审计，请在 MetaMask 中确认...')
+      
+      const txResponse = await contract.initiateAudit(
+        accountId,
+        auditType,
+        {
+          gasLimit: gasLimit,
+          gasPrice: gasPrice
+        }
+      )
+
+      // Add to transaction history
+      const newTx: TransactionStatus = {
+        hash: txResponse.hash,
+        status: 'pending',
+        type: `发起审计 - ${auditType}`,
+        timestamp: Date.now()
+      }
+      setTransactionHistory(prev => [newTx, ...prev])
+
+      showMessage(`审计交易已提交! 哈希: ${txResponse.hash}`)
+      showMessage('等待区块确认...')
+
+      // Wait for confirmation
+      const receipt = await txResponse.wait()
+      
+      if (receipt.status === 1) {
+        // Update transaction status
+        setTransactionHistory(prev => 
+          prev.map(tx => 
+            tx.hash === txResponse.hash 
+              ? { ...tx, status: 'confirmed' as const }
+              : tx
+          )
+        )
+        
+        showMessage(`审计发起成功! 区块: ${receipt.blockNumber}`)
+        
+        // Reset form
+        setAuditType('')
+        
+        // Update balance
+        const newBalance = await provider!.getBalance(account)
+        setBalance(ethers.formatEther(newBalance))
+        
+      } else {
+        throw new Error('交易失败')
+      }
+
+    } catch (error: any) {
+      console.error('发起审计失败:', error)
+      
+      if (error.hash) {
+        setTransactionHistory(prev => 
+          prev.map(tx => 
+            tx.hash === error.hash 
+              ? { ...tx, status: 'failed' as const }
+              : tx
+          )
+        )
+      }
+      
+      let errorMessage = '发起审计失败'
+      if (error.code === 'ACTION_REJECTED') {
+        errorMessage = '用户取消了交易'
+      } else if (error.code === 'INSUFFICIENT_FUNDS') {
+        errorMessage = 'ETH 余额不足支付 Gas 费用'
+      } else if (error.message) {
+        errorMessage += ': ' + error.message
+      }
+      
+      showMessage(errorMessage)
+    } finally {
+      setLoadingState(false)
+    }
+  }
+
+  return (
+    <div className="terminal-box">
+      <h1 className="title">机密财务审计系统</h1>
+      <p className="subtitle">Privacy-Preserving Financial Audit</p>
+
+      {/* Network Info */}
+      <div className="blockchain-info">
+        <p>&gt; <strong>Sepolia 测试网络</strong> - 基于 FHEVM 的隐私保护</p>
+        <p>&gt; 合约地址: <span className="highlight">0xa57c...3298</span></p>
+        {networkInfo.isConnected && (
+          <>
+            <p>&gt; 网络: <span className="highlight">{networkInfo.name}</span></p>
+            <p>&gt; 链 ID: <span className="highlight">{networkInfo.chainId}</span></p>
+            {networkInfo.blockNumber && (
+              <p>&gt; 最新区块: <span className="highlight">{networkInfo.blockNumber}</span></p>
+            )}
+          </>
+        )}
+        {account && (
+          <>
+            <p>&gt; 钱包余额: <span className="highlight">{parseFloat(balance).toFixed(4)} ETH</span></p>
+            <p>&gt; Gas 价格: <span className="highlight">{parseFloat(gasPrice).toFixed(2)} Gwei</span></p>
+          </>
+        )}
+      </div>
+
+      {/* Description */}
+      <div className="terminal-text">
+        <p>&gt; 欢迎使用机密财务审计系统</p>
+        <p>&gt; 所有财务数据均采用全同态加密(FHE)技术保护</p>
+        <p>&gt; 账户余额和交易记录完全加密存储</p>
+        <p>&gt; 审计员可以在不泄露具体数值的情况下进行审计</p>
+        <p>&gt; 基于 Zama FHEVM 技术，确保隐私安全</p>
+      </div>
+
+      {/* Status Message */}
+      <div className="message-box">
+        <p>&gt; {message}</p>
+      </div>
+
+      {/* Tab Navigation */}
+      {account && (
+        <div className="tab-navigation">
+          <button 
+            className={`tab-button ${activeTab === 'accounts' ? 'active' : ''}`}
+            onClick={() => setActiveTab('accounts')}
+          >
+            账户管理
+          </button>
+          <button 
+            className={`tab-button ${activeTab === 'audit' ? 'active' : ''}`}
+            onClick={() => setActiveTab('audit')}
+          >
+            审计功能
+          </button>
+          <button 
+            className={`tab-button ${activeTab === 'transactions' ? 'active' : ''}`}
+            onClick={() => setActiveTab('transactions' as any)}
+          >
+            交易历史
+          </button>
+        </div>
+      )}
+
+      {/* Account Management Tab */}
+      {account && activeTab === 'accounts' && (
+        <div className="account-section">
+          <h3>创建新账户</h3>
+          <div className="input-group">
+            <select 
+              className="input-box" 
+              value={accountType}
+              onChange={(e) => setAccountType(e.target.value)}
+            >
+              <option value="">选择账户类型</option>
+              <option value="company">企业账户</option>
+              <option value="personal">个人账户</option>
+              <option value="institutional">机构账户</option>
+              <option value="government">政府账户</option>
+            </select>
+            <input
+              className="input-box"
+              type="number"
+              placeholder="输入初始余额 (ETH)"
+              step="0.001"
+              min="0"
+              value={initialBalance}
+              onChange={(e) => setInitialBalance(e.target.value)}
+            />
+            <button 
+              className="button create-button" 
+              onClick={createAccount}
+              disabled={loading}
+            >
+              {loading ? '创建中...' : '创建账户'}
+            </button>
+          </div>
+
+          {/* Preset Balance Options */}
+          <div className="preset-section">
+            <h4>常用余额预设</h4>
+            <div className="preset-buttons">
+              <button className="preset-btn" onClick={() => setInitialBalance('0.1')}>0.1 ETH</button>
+              <button className="preset-btn" onClick={() => setInitialBalance('0.5')}>0.5 ETH</button>
+              <button className="preset-btn" onClick={() => setInitialBalance('1.0')}>1.0 ETH</button>
+              <button className="preset-btn" onClick={() => setInitialBalance('5.0')}>5.0 ETH</button>
+            </div>
+          </div>
+
+          <h3>我的账户</h3>
+          {userAccounts.length > 0 ? (
+            <div className="account-list">
+              {userAccounts.map((acc) => (
+                <div key={acc.id} className="account-item">
+                  <p>账户 #{acc.id}</p>
+                  <p>类型: {acc.accountType || '未知'}</p>
+                  <p>状态: {acc.isActive ? '活跃' : '停用'}</p>
+                  <p>最后更新: {new Date(acc.lastUpdated * 1000).toLocaleString()}</p>
+                  <button 
+                    className="button select-button"
+                    onClick={() => setSelectedAccount(acc.id)}
+                    disabled={!acc.isActive}
+                  >
+                    {selectedAccount === acc.id ? '已选择' : '选择'}
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p>暂无账户，请创建第一个账户</p>
+          )}
+
+          {selectedAccount !== null && (
+            <div className="balance-update">
+              <h3>更新余额 - 账户 #{selectedAccount}</h3>
+              <div className="input-group">
+                <select 
+                  className="input-box" 
+                  value={updateType}
+                  onChange={(e) => setUpdateType(e.target.value)}
+                >
+                  <option value="deposit">存款</option>
+                  <option value="withdraw">提款</option>
+                  <option value="transfer">转账</option>
+                  <option value="payment">支付</option>
+                </select>
+                <input
+                  className="input-box"
+                  type="number"
+                  placeholder="输入金额 (ETH)"
+                  step="0.001"
+                  min="0"
+                  value={updateAmount}
+                  onChange={(e) => setUpdateAmount(e.target.value)}
+                />
+                <button 
+                  className="button update-button" 
+                  onClick={updateAccountBalance}
+                  disabled={loading}
+                >
+                  {loading ? '更新中...' : '更新余额'}
+                </button>
+              </div>
+              
+              {/* Preset Update Amounts */}
+              <div className="preset-section">
+                <h4>常用金额预设</h4>
+                <div className="preset-buttons">
+                  <button className="preset-btn" onClick={() => setUpdateAmount('0.01')}>0.01 ETH</button>
+                  <button className="preset-btn" onClick={() => setUpdateAmount('0.1')}>0.1 ETH</button>
+                  <button className="preset-btn" onClick={() => setUpdateAmount('1.0')}>1.0 ETH</button>
+                  <button className="preset-btn" onClick={() => setUpdateAmount('10.0')}>10.0 ETH</button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+        {/* Audit Tab */}
+        {account && activeTab === 'audit' && (
+          <div className="content-section">
+            {isAuditor ? (
+              <>
+                <h2 className="section-title">审计员功能</h2>
+                <p style={{ color: 'var(--text-secondary)', marginBottom: '1.5rem' }}>
+                  作为审计员，您可以对账户进行隐私保护审计
+                </p>
+                
+                {/* Audit Type Selection */}
+                <div className="form-group">
+                  <div className="form-field">
+                    <label className="field-label">审计类型</label>
+                    <select 
+                      className="select-field" 
+                      value={auditType}
+                      onChange={(e) => setAuditType(e.target.value)}
+                    >
+                      <option value="">选择审计类型</option>
+                      <option value="compliance">合规性审计</option>
+                      <option value="financial">财务审计</option>
+                      <option value="operational">运营审计</option>
+                      <option value="security">安全审计</option>
+                    </select>
+                  </div>
+                </div>
+                
+                <div className="card-grid">
+                  {userAccounts.map((acc) => (
+                    <div key={acc.id} className="card">
+                      <div className="card-header">
+                        <div className="card-title">账户 #{acc.id}</div>
+                        <div className={`status-badge ${acc.isActive ? 'status-active' : 'status-inactive'}`}>
+                          {acc.isActive ? '可审计' : '已停用'}
+                        </div>
+                      </div>
+                      <div className="card-content">
+                        <div className="card-meta">类型: {acc.accountType || '未知'}</div>
+                        <div className="card-meta">最后更新: {new Date(acc.lastUpdated * 1000).toLocaleString()}</div>
+                      </div>
+                      <div className="card-actions">
+                        <button 
+                          className="btn btn-warning"
+                          onClick={() => initiateAudit(acc.id)}
+                          disabled={loading || !acc.isActive || !auditType}
+                        >
+                          发起审计
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <>
+                <h2 className="section-title">审计记录</h2>
+                <p style={{ color: 'var(--text-secondary)', marginBottom: '1.5rem' }}>
+                  您不是审计员，无法执行审计操作。您可以查看自己账户的审计历史记录。
+                </p>
+                
+                {/* Audit History Filters */}
+                <div className="form-group">
+                  <div className="form-field">
+                    <label className="field-label">筛选条件</label>
+                    <select 
+                      className="select-field" 
+                      value={auditFilter}
+                      onChange={(e) => setAuditFilter(e.target.value)}
+                    >
+                      <option value="all">所有审计</option>
+                      <option value="pending">待处理</option>
+                      <option value="completed">已完成</option>
+                      <option value="failed">审计异常</option>
+                    </select>
+                  </div>
+                  <button className="btn btn-secondary">
+                    查看记录
+                  </button>
+                </div>
+                
+                <div className="empty-state">
+                  <div className="empty-icon">📋</div>
+                  <div className="empty-title">暂无审计记录</div>
+                  <div className="empty-description">当审计员对您的账户进行审计时，记录将显示在这里</div>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {/* Transaction History Tab */}
+        {account && activeTab === 'transactions' && (
+          <div className="content-section">
+            <h2 className="section-title">交易历史</h2>
+            {transactionHistory.length > 0 ? (
+              <div className="transaction-list">
+                {transactionHistory.map((tx, index) => (
+                  <div key={index} className={`transaction-item ${tx.status}`}>
+                    <div className="transaction-header">
+                      <div className="transaction-type">{tx.type}</div>
+                      <div className={`status-badge status-${tx.status}`}>
+                        {tx.status === 'pending' && '等待中'}
+                        {tx.status === 'confirmed' && '已确认'}
+                        {tx.status === 'failed' && '失败'}
+                      </div>
+                    </div>
+                    <div className="transaction-details">
+                      <div className="transaction-detail">
+                        <div className="detail-label">交易哈希</div>
+                        <div className="detail-value">
+                          <a 
+                            href={`https://sepolia.etherscan.io/tx/${tx.hash}`} 
+                            target="_blank" 
+                            rel="noopener noreferrer"
+                            className="detail-link"
+                          >
+                            {tx.hash.slice(0, 10)}...{tx.hash.slice(-8)}
+                          </a>
+                        </div>
+                      </div>
+                      <div className="transaction-detail">
+                        <div className="detail-label">时间</div>
+                        <div className="detail-value">{new Date(tx.timestamp).toLocaleString()}</div>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="empty-state">
+                <div className="empty-icon">📜</div>
+                <div className="empty-title">暂无交易记录</div>
+                <div className="empty-description">开始使用系统后，交易历史将显示在这里</div>
+              </div>
+            )}
+            
+            {/* Gas Price Monitor */}
+            <div className="gas-monitor">
+              <div className="gas-title">⛽ Gas 监控</div>
+              <div className="gas-info">
+                <div className="gas-item">
+                  <div className="gas-label">当前 Gas 价格</div>
+                  <div className="gas-value">{parseFloat(gasPrice).toFixed(2)} Gwei</div>
+                </div>
+                <div className="gas-item">
+                  <div className="gas-label">钱包余额</div>
+                  <div className="gas-value">{parseFloat(balance).toFixed(6)} ETH</div>
+                </div>
+                <button 
+                  className="btn btn-secondary"
+                  onClick={async () => {
+                    if (provider) {
+                      const feeData = await provider.getFeeData()
+                      const newBalance = await provider.getBalance(account)
+                      setGasPrice(ethers.formatUnits(feeData.gasPrice || 0, 'gwei'))
+                      setBalance(ethers.formatEther(newBalance))
+                      showMessage('Gas 价格已更新')
+                    }
+                  }}
+                  disabled={loading}
+                >
+                  刷新
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+      {/* Connect Button */}
+      <div className="button-group">
+        {!account ? (
+          <button 
+            className="wallet-button" 
+            onClick={connectWallet}
+            disabled={loading}
+          >
+            {loading ? '连接中...' : '连接钱包'}
+          </button>
+        ) : (
+          <div className="wallet-info">
+            <button className="wallet-button connected" disabled>
+              {account.slice(0, 6)}...{account.slice(-4)}
+            </button>
+            <button 
+              className="button disconnect-button"
+              onClick={disconnectWallet}
+              disabled={loading}
+            >
+              断开连接
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Footer */}
+      <div className="footer">
+        <p>&gt; 基于 Zama FHEVM 的隐私保护审计系统</p>
+        <p>&gt; 所有数据均经过全同态加密保护</p>
+      </div>
+    </div>
+  )
+}
+
+export default App
