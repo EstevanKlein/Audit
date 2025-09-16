@@ -1,0 +1,88 @@
+              {isAuditor ? (
+                <>
+                  {/* Audit Configuration */}
+                  <div className="form-card">
+                    <h3 className="form-title">Initiate Audit</h3>
+                    <div className="form-grid">
+                      <div className="form-group">
+                        <label className="form-label">Audit Type</label>
+                        <select 
+                          className="form-select" 
+                          value={auditType}
+                          onChange={(e) => setAuditType(e.target.value)}
+                        >
+                          <option value="">Select audit type</option>
+                          <option value="compliance">Compliance Audit</option>
+                          <option value="financial">Financial Audit</option>
+                          <option value="operational">Operational Audit</option>
+                          <option value="security">Security Audit</option>
+                        </select>
+                      </div>
+                      <div className="form-group">
+                        <label className="form-label">Account ID to Audit</label>
+                        <input
+                          className="form-input"
+                          type="number"
+                          placeholder="Enter account ID"
+                          min="0"
+                          value={auditAccountId}
+                          onChange={(e) => setAuditAccountId(e.target.value)}
+                        />
+                      </div>
+                    </div>
+                    
+                    <button 
+                      className="form-submit-btn audit-submit-btn"
+                      onClick={() => auditAccountId && initiateAudit(parseInt(auditAccountId))}
+                      disabled={loading || !auditType || !auditAccountId}
+                    >
+                      {loading ? (
+                        <>
+                          <div className="loading-spinner"></div>
+                          Initiating Audit...
+                        </>
+                      ) : (
+                        <>
+                          <span className="btn-icon">🔍</span>
+                          Initiate Audit
+                        </>
+                      )}
+                    </button>
+                  </div>
+                  
+                  {/* Quick Audit for User Accounts */}
+                  {userAccounts.length > 0 && (
+                    <div className="form-card">
+                      <h3 className="form-title">Quick Audit - My Accounts</h3>
+                      <div className="account-grid">
+                        {userAccounts.map((acc) => (
+                          <div key={acc.id} className="account-card audit-card">
+                            <div className="account-header">
+                              <div className="account-id">Account #{acc.id}</div>
+                              <div className={`account-status ${acc.isActive ? 'active' : 'inactive'}`}>
+                                {acc.isActive ? 'Auditable' : 'Inactive'}
+                              </div>
+                            </div>
+                            <div className="account-details">
+                              <div className="account-detail">
+                                <span className="detail-label">Type:</span>
+                                <span className="detail-value">{acc.accountType || 'Unknown'}</span>
+                              </div>
+                              <div className="account-detail">
+                                <span className="detail-label">Last Updated:</span>
+                                <span className="detail-value">{new Date(acc.lastUpdated * 1000).toLocaleDateString()}</span>
+                              </div>
+                            </div>
+                            <button 
+                              className="audit-btn"
+                              onClick={() => initiateAudit(acc.id)}
+                              disabled={loading || !acc.isActive || !auditType}
+                            >
+                              <span className="btn-icon">🔍</span>
+                              Quick Audit
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
